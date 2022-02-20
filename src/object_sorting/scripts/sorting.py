@@ -541,30 +541,40 @@ th = threading.Thread(target=move)
 th.setDaemon(True)
 th.start()
 
-# 检测apriltag
+# 检测apriltag (detect april tag)
 detector = apriltag.Detector(searchpath=apriltag._get_demo_searchpath())
 def apriltagDetect(img):
     global tag1, tag2, tag3
 
+    # Make the image grayscale and run apriltag detector
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     detections = detector.detect(gray, return_image=False)
 
+    # Setup data structures for containing tag detection information
     tag1 = ['tag1', -1, -1, -1, 0]
     tag2 = ['tag2', -1, -1, -1, 0]
     tag3 = ['tag3', -1, -1, -1, 0]
+
+    # If the detector detected a tag...
     if len(detections) != 0:
+        # Go through each detection
         for i, detection in enumerate(detections):
-            corners = np.rint(detection.corners)  # 获取四个角点
+            # Draw the contours around the corners of the april tag
+            corners = np.rint(detection.corners)  # 获取四个角点 (get four corners)
             cv2.drawContours(img, [np.array(corners, np.int)], -1, (0, 255, 255), 2)
 
-            tag_family = str(detection.tag_family, encoding='utf-8')  # 获取tag_family
-            tag_id = int(detection.tag_id)  # 获取tag_id
+            # Grab the tag family and tag id
+            tag_family = str(detection.tag_family, encoding='utf-8')  # 获取tag_family (get tag_family)
+            tag_id = int(detection.tag_id)  # 获取tag_id (get tag_id)
 
-            object_center_x, object_center_y = int(detection.center[0]), int(detection.center[1])  # 中心点
-            object_angle = int(math.degrees(math.atan2(corners[0][1] - corners[1][1], corners[0][0] - corners[1][0])))  # 计算旋转角
+            # Get the position and orientation (just one angle) of the detected tag
+            object_center_x, object_center_y = int(detection.center[0]), int(detection.center[1])  # 中心点 (center point)
+            object_angle = int(math.degrees(math.atan2(corners[0][1] - corners[1][1], corners[0][0] - corners[1][0])))  # 计算旋转角 (Calculate the rotation angle)
 
+            # Put text where the tag was detected
             cv2.putText(img, str(tag_id), (object_center_x - 10, object_center_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 255], 2)
 
+            # Populate tag information for the respective detected tag
             if tag_id == 1:
                 tag1 = ['tag1', object_center_x, object_center_y, object_angle]
             elif tag_id == 2:
@@ -591,7 +601,7 @@ last_y = 0
 state = None
 x_adjust = 0
 pick_color = ''
-# 颜色夹取策略
+# 颜色夹取策略 (Color clipping strategy)
 def color_sort(img, target):
     global X, Y
     global count
@@ -611,13 +621,16 @@ def color_sort(img, target):
     global last_box_rotation_angle
     global last_x, last_y, count_d, start_move
 
+    # Grab a copy of the image and it's dimensions
     img_copy = img.copy()
     img_h, img_w = img.shape[:2]
 
+    # Resize the image, grayscale it, and convert to LAB space
     frame_resize = cv2.resize(img_copy, size, interpolation=cv2.INTER_NEAREST)
     frame_gray = cv2.cvtColor(frame_resize, cv2.COLOR_BGR2GRAY)
-    frame_lab = cv2.cvtColor(frame_resize, cv2.COLOR_BGR2LAB)  # 将图像转换到LAB空间
+    frame_lab = cv2.cvtColor(frame_resize, cv2.COLOR_BGR2LAB)  # 将图像转换到LAB空间 (Convert image to LAB space)
 
+    # Figure out the area of the colored cube
     max_area = 0
     color_area_max = None
     areaMaxContour_max = 0
@@ -626,28 +639,28 @@ def color_sort(img, target):
         if i in target:
             if i in detect_color:
                 target_color_range = color_range[i]
-                frame_mask1 = cv2.inRange(frame_lab, tuple(target_color_range['min']), tuple(target_color_range['max']))  # 对原图像和掩模进行位运算
+                frame_mask1 = cv2.inRange(frame_lab, tuple(target_color_range['min']), tuple(target_color_range['max']))  # 对原图像和掩模进行位运算 (Bitwise operations on the original image and mask)
                 #mask = cv2.bitwise_and(roi, frame_gray)
                 frame_mask2 = cv2.bitwise_and(roi, frame_mask1)
-                eroded = cv2.erode(frame_mask2, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  #腐蚀
-                dilated = cv2.dilate(eroded, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))) #膨胀
+                eroded = cv2.erode(frame_mask2, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  #腐蚀 (corrosion)
+                dilated = cv2.dilate(eroded, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))) #膨胀 (swell)
                 #cv2.imshow('mask', dilated)
                 #cv2.waitKey(1)
-                contours = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[-2]  # 找出轮廓
-                areaMaxContour, area_max = getAreaMaxContour(contours)  # 找出最大轮廓
+                contours = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[-2]  # 找出轮廓 (find the outline)
+                areaMaxContour, area_max = getAreaMaxContour(contours)  # 找出最大轮廓 (find the largest contour)
                 if areaMaxContour is not None:
-                    if area_max > max_area and area_max > 100:#找最大面积
+                    if area_max > max_area and area_max > 100:#找最大面积 (find the largest area)
                         max_area = area_max
                         color_area_max = i
                         areaMaxContour_max = areaMaxContour
-    if max_area > 100:  # 有找到最大面积
+    if max_area > 100:  # 有找到最大面积 (have found the largest area)
         rect = cv2.minAreaRect(areaMaxContour_max)
         box_rotation_angle = rect[2]
         if box_rotation_angle > 45:
             box_rotation_angle =  box_rotation_angle - 90
 
         box = np.int0(cv2.boxPoints(rect))
-        for j in range(4): # 映射到原图大小
+        for j in range(4): # 映射到原图大小 (Map to original size)
             box[j, 0] = int(Misc.map(box[j, 0], 0, size[0], 0, img_w))
             box[j, 1] = int(Misc.map(box[j, 1], 0, size[1], 0, img_h))
 
@@ -762,7 +775,7 @@ def color_sort(img, target):
 
 d_map = 0.015
 tag_map = [425, 384, 346, 310, 272, 239, 208, 177, 153, 129, 106, 86, 68, 51]
-# apriltag夹取策略
+# apriltag夹取策略 (apriltag clipping strategy)
 def tag_sort(img, target):
     global X, Y
     global state
@@ -777,12 +790,16 @@ def tag_sort(img, target):
     global box_rotation_angle
     global tag_x_dis, tag_y_dis
 
+    # Grab a copy of the image and the height and width of the image
     img_copy = img.copy()
     img_h, img_w = img.shape[:2]
 
+    # Grab the center position of the april tag in the image
     centerX = target[1]
     centerY = target[2]
 
+    # Grab the rotation of the april tag in the image
+    # Enforce some kind of boundaries for the angle
     box_rotation_angle = abs(target[3])
     if box_rotation_angle > 90:
         box_rotation_angle -= 90
@@ -791,22 +808,39 @@ def tag_sort(img, target):
     if target[3] < 0:
         box_rotation_angle = -box_rotation_angle
 
-    distance = math.sqrt(pow(centerX - last_X, 2) + pow(centerY - last_Y, 2)) #对比上次坐标来判断是否移动
+    # Figure out the distance between the last position of the tag and the current position of the tag in the image
+    distance = math.sqrt(pow(centerX - last_X, 2) + pow(centerY - last_Y, 2)) #对比上次坐标来判断是否移动 (Compare the last coordinates to determine whether to move)
+    # If distance below a certain threshold and the robot has not moved yet
     if distance < 5 and not start_move:
+        # Increase count2 counter
         count2 += 1
+        # Once the count2 counter is beyond a threshold...
         if count2 > 20:
+            # Reset the count2 counter
             count2 = 0
+            # Set the robot to start moving
             start_move = True
+    # Otherwise...
     else:
+        # Reset the counter
         count2 = 0
+
+    # If the robot is not currently approaching and it has started moving OR
+    # If the robot is currently adjusting and it has started moving
     if (not approach or adjust) and start_move:
-        tag_x_pid.SetPoint = center_x #设定
-        tag_x_pid.update(centerX) #当前
+        # Set the PID set point as the center x position of the image (???)
+        tag_x_pid.SetPoint = center_x #设定 (set up)
+        # Update the current point of the PID control to the center x position of the april tag in the image
+        tag_x_pid.update(centerX) #当前 (current)
+        # Run the controller to get a delta x
         dx = tag_x_pid.output
-        tag_x_dis += dx #输出
+        # Change the tag x distance by the delta x from the controller
+        tag_x_dis += dx #输出 (output)
+        # Enfource boundaries for tag x distance
         tag_x_dis = 0 if tag_x_dis < 0 else tag_x_dis
         tag_x_dis = 1000 if tag_x_dis > 1000 else tag_x_dis
 
+        # Map a corresponding Y position from the x
         if abs(centerX - last_X) <= 1 and X != -1:
             count3 += 1
             rospy.sleep(0.01)
@@ -865,21 +899,34 @@ def run(img):
     global count_tag_timeout
     global count_adjust_timeout
 
+    # Check if there's an april tag in the image (frame)
+    # __target_data[0] contains colors to look for. __target_data[1] contains april tags to look for
+    # Only check for april tags if that's part of the target data
     if len(__target_data[1]) != 0:
-        apriltagDetect(img) # apriltag检测
+        apriltagDetect(img) # apriltag检测 (apriltag detection)
 
-    # 选取策略，优先tag, 夹取超时处理
+    # 选取策略，优先tag, 夹取超时处理 (Selection strategy, priority tag, clip timeout processing)
+    # If tag1 is a tag the robot is generally looking for (in __target_data[1]) and is looking for in this program (in current_tag)
     if 'tag1' in __target_data[1] and 'tag1' in current_tag:
+        # If tag1 was detected...
+        # tag1 = ['tag1', object_center_x, object_center_y, object_angle]
         if tag1[1] != -1:
+            # Reset the count timeout for adjusting the motor positions (???)
             count_adjust_timeout = 0
+            # Map a Y from the tag's X position (???)
             img = tag_sort(img, tag1)
+        # Otherwise, tag1 was not detected
         else:
+            # If currently adjusting
             if adjust:
+                # keep adjusting as long as the timeout doesn't exceed some threshold
                 count_adjust_timeout += 1
                 if count_adjust_timeout > 50:
                     count_adjust_timeout = 0
                     adjust_error = True
+            # Otherwise, not currently adjusting - robot is aligned (???)
             else:
+                # Stop focusing on tag 1 after some timeout period (???)
                 count_tag_timeout += 1
                 if count_tag_timeout > 3:
                     count_tag_timeout = 0
@@ -917,7 +964,9 @@ def run(img):
                     count_tag_timeout = 0
                     if current_tag != 'tag3':
                         current_tag.remove('tag3')
+    # Check for colored blocks if they are included in __target_data
     elif len(__target_data[0]) != 0:
+
         img = color_sort(img, __target_data[0])
     else:
         current_tag = ['tag1', 'tag2', 'tag3']
@@ -932,19 +981,20 @@ def image_callback(ros_image):
     global stop_state
 
     image = np.ndarray(shape=(ros_image.height, ros_image.width, 3), dtype=np.uint8,
-                       buffer=ros_image.data)  # 将自定义图像消息转化为图像
-    cv2_img = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # 转为opencv格式
-    frame = cv2_img.copy()
-    frame_result = frame
+                       buffer=ros_image.data)  # 将自定义图像消息转化为图像 (Convert custom image messages to images)
+    cv2_img = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) # 转为opencv格式 (Convert to opencv format)
+    frame = cv2_img.copy() # Copy the frame
+    frame_result = frame # Copy it again into frame_result
 
     with lock:
         if  __isRunning:
+            # If the program is running, then run the program on the frame and grab the result
             frame_result = run(frame)
         else:
             if stop_state:
                 stop_state = 0
                 initMove(delay=False)
-    rgb_image = cv2.cvtColor(frame_result, cv2.COLOR_BGR2RGB).tostring() # 转为ros格式
+    rgb_image = cv2.cvtColor(frame_result, cv2.COLOR_BGR2RGB).tostring() # 转为ros格式 (Convert to ros format)
     ros_image.data = rgb_image
     image_pub.publish(ros_image)
 
@@ -1024,7 +1074,7 @@ def set_target(msg):
 
     return [True, 'set_target']
 
-# 心跳
+# 心跳 (heartbeat)
 def heartbeat_srv_cb(msg):
     global heartbeat_timer
 
