@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 #  Standard libraries
+from traceback import FrameSummary
 from typing import Tuple, Any
 import math
 import cv2
@@ -13,6 +14,7 @@ from geometry_msgs.msg import Point
 # Arm fpv libraries
 from sensor.msg import Led
 from armpi_fpv import Misc
+from armpi_fpv import apriltag
 from object_tracking.srv import SetTarget
 
 class ArmPerceptionNode():
@@ -36,8 +38,12 @@ class ArmPerceptionNode():
         self.set_target_srv = rospy.Service('/perception/set_target', SetTarget, self.set_target)
         # Frame size
         self.size = (320, 240)
-        # Target color
+        # Target - either color or april tag
         self._target_color = None
+        # April tag detector
+        self.detector = apriltag.Detector(searchpath=apriltag._get_demo_searchpath())
+        # List of tags
+        self.tags = ['tag1', 'tag2', 'tag3']
         # Colors for LED
         self.range_rgb = {
             'red': (0, 0, 255),
@@ -45,11 +51,14 @@ class ArmPerceptionNode():
             'green': (0, 255, 0),
             'black': (0, 0, 0),
             'white': (255, 255, 255),
+            'tag1' : (255, 255, 0),
+            'tag2' : (255, 0, 255),
+            'tag3' : (0, 255, 255)
         }
         return None
 
     def set_target(self, msg):
-        """Set a target color. Change LED color to correspond to target color."""
+        """Set a target. Change LED color to correspond to target color, or corrseponding color if target is arcuo tag."""
         rospy.loginfo("%s", msg)
         self._target_color = msg.data
         led = Led()
@@ -79,8 +88,8 @@ class ArmPerceptionNode():
         # Process the frame to get an rgb image with sensing shown on it
         # Also get parameters for controller
         frame = cv2_img.copy()
-        processed_frame, area_max, center_x, center_y = self.process_frame(frame)
-        rospy.loginfo(f"area_max: {area_max}")
+        processed_frame, center_x, center_y = self.process_frame(frame)
+        # rospy.logdebug(f"area_max: {area_max}")
         rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB).tostring()
 
         # Populate image message with the new image and publish it
@@ -113,12 +122,8 @@ class ArmPerceptionNode():
 
         return area_max_contour, contour_area_max  # 返回最大的轮廓
 
-    def process_frame(self, frame: np.array)->Tuple[np.array, int, int, float]:
-        """Process the frame. Take in a raw frame, detect the cube in the frame,
-        and return the processed frame and parameters for describing the cube
-        position in the frame."""
-        # Make an image copy and grab the dimensions
-        img_copy = frame.copy()
+    def detect_color(self, frame: np.array)->Tuple[np.array, int, int]:
+        # Grab frame dimensions
         img_h, img_w = frame.shape[:2]
 
         # Draw a crosshair in the center of the frame
@@ -126,23 +131,19 @@ class ArmPerceptionNode():
         cv2.line(frame, (int(img_w / 2), int(img_h / 2 - 10)), (int(img_w / 2), int(img_h / 2 + 10)), (0, 255, 255), 2)
 
         # Resize the frame and convert it to LAB space
-        frame_resize = cv2.resize(img_copy, self.size, interpolation=cv2.INTER_NEAREST)
+        frame_resize = cv2.resize(frame, self.size, interpolation=cv2.INTER_NEAREST)
         frame_lab = cv2.cvtColor(frame_resize, cv2.COLOR_BGR2LAB)  # 将图像转换到LAB空间
 
         area_max = 0
         area_max_contour = 0
 
-        # _target_color - Current color the robot is looking for
-        # color_range is the ranges for specific colors in the LAB space
-        # If the current color the robot is looking for is included in the color ranges
-        if self._target_color in self.color_range:
-            # target color range is the color range for the specific target color
-            target_color_range = self.color_range[self._target_color]
-            frame_mask = cv2.inRange(frame_lab, tuple(target_color_range['min']), tuple(target_color_range['max']))  # 对原图像和掩模进行位运算 (Bitwise operations on the original image and mask)
-            eroded = cv2.erode(frame_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  # 腐蚀 (corrosion)
-            dilated = cv2.dilate(eroded, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  # 膨胀 (swell)
-            contours = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[-2]  # 找出轮廓 (find the outline)
-            area_max_contour, area_max = self.getAreaMaxContour(contours)  # 找出最大轮廓 (find the largest contour)
+        # target color range is the color range for the specific target color
+        target_color_range = self.color_range[self._target_color]
+        frame_mask = cv2.inRange(frame_lab, tuple(target_color_range['min']), tuple(target_color_range['max']))  # 对原图像和掩模进行位运算 (Bitwise operations on the original image and mask)
+        eroded = cv2.erode(frame_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  # 腐蚀 (corrosion)
+        dilated = cv2.dilate(eroded, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  # 膨胀 (swell)
+        contours = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[-2]  # 找出轮廓 (find the outline)
+        area_max_contour, area_max = self.getAreaMaxContour(contours)  # 找出最大轮廓 (find the largest contour)
 
         center_x = None
         center_y = None
@@ -157,8 +158,25 @@ class ArmPerceptionNode():
                 # Draw a circle around the target color
                 cv2.circle(frame, (int(center_x), int(center_y)), int(radius), self.range_rgb[self._target_color], 2)
 
+        return frame, center_x, center_y
+
+    def process_frame(self, frame: np.array)->Tuple[np.array, int, int, float]:
+        """Process the frame. Take in a raw frame, detect the cube in the frame,
+        and return the processed frame and parameters for describing the cube
+        position in the frame."""
+
+        # _target_color - Current color the robot is looking for
+        # color_range is the ranges for specific colors in the LAB space
+        # If the current color the robot is looking for is included in the color ranges
+        if self._target_color in self.color_range:
+            processed_frame, center_x, center_y = self.detect_color(frame)
+        else:
+            processed_frame = frame.copy()
+            center_x = None
+            center_y = None
+
         # Return the processed frame along with parameters describing perceived object
-        return frame, area_max, center_x, center_y
+        return processed_frame, center_x, center_y
 
 if __name__ == '__main__':
     perception_node = ArmPerceptionNode()
