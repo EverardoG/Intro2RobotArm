@@ -8,7 +8,7 @@ import numpy as np
 # ROS libaries
 import rospy
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Pose2D
+from geometry_msgs.msg import PointStamped
 
 # Arm fpv libraries
 from sensor.msg import Led
@@ -21,6 +21,7 @@ class ArmPerceptionNode():
         """Initialize arm perception node."""
         rospy.init_node('perception_node')
         rospy.loginfo("Arm perception code Init")
+
         # Get lab range from ros param server
         self.color_range = rospy.get_param('/lab_config_manager/color_range_list', {})
         # Frame size
@@ -42,12 +43,14 @@ class ArmPerceptionNode():
             'tag2' : (255, 0, 255),
             'tag3' : (0, 255, 255)
         }
+        # Start counter for publishing points
+        self._point_count = 0
         # Publisher for processed images visualizing what perception is doing
         self.image_pub = rospy.Publisher('/perception/image_result', Image, queue_size=1)  # register result image publisher
         # Publisher for LED commands
         self.rgb_pub = rospy.Publisher('/sensor/rgb_led', Led, queue_size=1)
         # Publisher for target points
-        self.point_pub = rospy.Publisher('/perception/target_pose', Pose2D, queue_size=1)
+        self.point_pub = rospy.Publisher('/perception/target_info', PointStamped, queue_size=1)
         # Service for setting up the target color for the perception code
         self.set_target_srv = rospy.Service('/perception/set_target', SetTarget, self.set_target)
         # Subscriber for raw images
@@ -89,7 +92,7 @@ class ArmPerceptionNode():
         # Process the frame to get an rgb image with sensing shown on it
         # Also get parameters for controller
         frame = cv2_img.copy()
-        processed_frame, center_x, center_y, angle = self.process_frame(frame)
+        processed_frame, center_x, center_y, angle_or_area_max = self.process_frame(frame)
         # rospy.logdebug(f"area_max: {area_max}")
         rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB).tostring()
 
@@ -99,14 +102,15 @@ class ArmPerceptionNode():
 
         # If something was detected in the frame, publish its position
         if center_x is not None and center_y is not None:
-            point_msg = Pose2D()
-            point_msg.x = center_x
-            point_msg.y = center_y
-            if angle is not None:
-                point_msg.theta = angle
-            else:
-                point_msg.theta = 0
+            point_msg = PointStamped()
+            point_msg.header.stamp = rospy.get_rostime()
+            point_msg.header.seq = self._point_count
+            point_msg.header.frame_id = "camera_view"
+            point_msg.point.x = center_x
+            point_msg.point.y = center_y
+            point_msg.point.z = angle_or_area_max
             self.point_pub.publish(point_msg)
+            self._point_count += 1
 
         return None
 
@@ -158,12 +162,14 @@ class ArmPerceptionNode():
             center_x = int(Misc.map(center_x, 0, self.size[0], 0, img_w))
             center_y = int(Misc.map(center_y, 0, self.size[1], 0, img_h))
             radius = int(Misc.map(radius, 0, self.size[0], 0, img_w))
-            # If the radius is above some threshold (too big?), publish the image as is
+            # If the radius is too large, this indicates the target is too big to be valid and must be a false positive
             if radius < 100:
                 # Draw a circle around the target color
                 cv2.circle(frame, (int(center_x), int(center_y)), int(radius), self.range_rgb[self._target], 2)
+            else:
+                center_x, center_y, area_max = None, None, None
 
-        return frame, center_x, center_y
+        return frame, center_x, center_y, area_max
 
     def detect_tag(self, frame: np.array)->Tuple[np.array, int, int]:
         """Detect the target tag in the frame. Return the center x and y and angle if tag is found."""
@@ -184,14 +190,14 @@ class ArmPerceptionNode():
                 if self.tags[tag_id-1] == self._target:
                     # Draw the contours around the corners of the april tag
                     corners = np.rint(detection.corners)  # 获取四个角点 (get four corners)
-                    cv2.drawContours(frame, [np.array(corners, np.int)], -1, (0, 255, 255), 2)
+                    cv2.drawContours(frame, [np.array(corners, np.int)], -1, self.range_rgb[self._target], 2)
 
                     # Get the position and orientation (just one angle) of the detected tag
                     center_x, center_y = int(detection.center[0]), int(detection.center[1])  # 中心点 (center point)
                     angle = int(math.degrees(math.atan2(corners[0][1] - corners[1][1], corners[0][0] - corners[1][0])))  # 计算旋转角 (Calculate the rotation angle)
 
                     # Put text where the tag was detected
-                    cv2.putText(frame, str(tag_id), (center_x - 10, center_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 255], 2)
+                    cv2.putText(frame, str(tag_id), (center_x - 10, center_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, self.range_rgb[self._target], 2)
 
         return frame, center_x, center_y, angle
 
@@ -205,20 +211,21 @@ class ArmPerceptionNode():
         # If the current target the robot is looking for is included in the color ranges,
         # then detect the color
         if self._target in self.color_range:
-            processed_frame, center_x, center_y = self.detect_color(frame)
-            angle = None
+            processed_frame, center_x, center_y, area_max = self.detect_color(frame)
+            angle_or_area_max = area_max
         # If the target is one of the tags, then detect the tag
         elif self._target in self.tags:
             processed_frame, center_x, center_y, angle = self.detect_tag(frame)
+            angle_or_area_max = angle
         # Otherwise don't detect anything
         else:
             processed_frame = frame.copy()
             center_x = None
             center_y = None
-            angle = None
+            angle_or_area_max = None
 
         # Return the processed frame along with parameters describing perceived object
-        return processed_frame, center_x, center_y, angle
+        return processed_frame, center_x, center_y, angle_or_area_max
 
 if __name__ == '__main__':
     perception_node = ArmPerceptionNode()
