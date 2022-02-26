@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 #  Standard libraries
-from traceback import FrameSummary
 from typing import Tuple, Any
 import math
 import cv2
@@ -9,7 +8,7 @@ import numpy as np
 # ROS libaries
 import rospy
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Pose2D
 
 # Arm fpv libraries
 from sensor.msg import Led
@@ -22,15 +21,6 @@ class ArmPerceptionNode():
         """Initialize arm perception node."""
         rospy.init_node('perception_node')
         rospy.loginfo("Arm perception code Init")
-        # Subscriber for raw images
-        self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
-        # Publisher for processed images visualizing what perception is doing
-        self.image_pub = rospy.Publisher('/perception/image_result', Image, queue_size=1)  # register result image publisher
-        # Publisher for LED commands
-        self.rgb_pub = rospy.Publisher('/sensor/rgb_led', Led, queue_size=1)
-        # Publisher for target points
-        self.point_pub = rospy.Publisher('/perception/target_point', Point, queue_size=1)
-
         # Get lab range from ros param server
         self.color_range = rospy.get_param('/lab_config_manager/color_range_list', {})
 
@@ -44,6 +34,7 @@ class ArmPerceptionNode():
         self.detector = apriltag.Detector(searchpath=apriltag._get_demo_searchpath())
         # List of tags
         self.tags = ['tag1', 'tag2', 'tag3']
+        rospy.loginfo(f"self.tags: {self.tags}")
         # Colors for LED
         self.range_rgb = {
             'red': (0, 0, 255),
@@ -55,22 +46,34 @@ class ArmPerceptionNode():
             'tag2' : (255, 0, 255),
             'tag3' : (0, 255, 255)
         }
+        # Subscriber for raw images
+        self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
+        # Publisher for processed images visualizing what perception is doing
+        self.image_pub = rospy.Publisher('/perception/image_result', Image, queue_size=1)  # register result image publisher
+        # Publisher for LED commands
+        self.rgb_pub = rospy.Publisher('/sensor/rgb_led', Led, queue_size=1)
+        # Publisher for target points
+        self.point_pub = rospy.Publisher('/perception/target_pose', Pose2D, queue_size=1)
         return None
 
     def set_target(self, msg):
         """Set a target. Change LED color to correspond to target color, or corrseponding color if target is arcuo tag."""
         rospy.loginfo("%s", msg)
-        self._target_color = msg.data
-        led = Led()
-        led.index = 0
-        led.rgb.r = self.range_rgb[self._target_color][2]
-        led.rgb.g = self.range_rgb[self._target_color][1]
-        led.rgb.b = self.range_rgb[self._target_color][0]
-        self.rgb_pub.publish(led)
-        led.index = 1
-        self.rgb_pub.publish(led)
-        rospy.sleep(0.1)
-        return [True, 'set_target']
+        if msg.data in self.tags or msg.data in self.range_rgb:
+            self._target_color = msg.data
+            led = Led()
+            led.index = 0
+            led.rgb.r = self.range_rgb[self._target_color][2]
+            led.rgb.g = self.range_rgb[self._target_color][1]
+            led.rgb.b = self.range_rgb[self._target_color][0]
+            self.rgb_pub.publish(led)
+            led.index = 1
+            self.rgb_pub.publish(led)
+            rospy.sleep(0.1)
+            return [True, 'set_target']
+        else:
+            rospy.logerr(f"\'{msg.data}\' is not a valid target")
+            return [False, 'set_target']
 
     def run(self) -> None:
         """Run the arm perception node"""
@@ -88,7 +91,7 @@ class ArmPerceptionNode():
         # Process the frame to get an rgb image with sensing shown on it
         # Also get parameters for controller
         frame = cv2_img.copy()
-        processed_frame, center_x, center_y = self.process_frame(frame)
+        processed_frame, center_x, center_y, angle = self.process_frame(frame)
         # rospy.logdebug(f"area_max: {area_max}")
         rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB).tostring()
 
@@ -98,10 +101,13 @@ class ArmPerceptionNode():
 
         # If something was detected in the frame, publish its position
         if center_x is not None and center_y is not None:
-            point_msg = Point()
+            point_msg = Pose2D()
             point_msg.x = center_x
             point_msg.y = center_y
-            point_msg.z = 0
+            if angle is not None:
+                point_msg.theta = angle
+            else:
+                point_msg.theta = 0
             self.point_pub.publish(point_msg)
 
         return None
@@ -160,7 +166,36 @@ class ArmPerceptionNode():
 
         return frame, center_x, center_y
 
-    def process_frame(self, frame: np.array)->Tuple[np.array, int, int, float]:
+    def detect_tag(self, frame: np.array)->Tuple[np.array, int, int]:
+        # Make the image grayscale and run apriltag detector
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        detections = self.detector.detect(gray, return_image=False)
+
+        center_x = None
+        center_y = None
+        angle = None
+
+        # If the detector detected a tag...
+        if len(detections) != 0:
+            # Go through each detection
+            for detection in detections:
+                # Grab the id to determine if it's the tag being searched for
+                tag_id = int(detection.tag_id)
+                if self.tags[tag_id-1] == self._target_color:
+                    # Draw the contours around the corners of the april tag
+                    corners = np.rint(detection.corners)  # 获取四个角点 (get four corners)
+                    cv2.drawContours(frame, [np.array(corners, np.int)], -1, (0, 255, 255), 2)
+
+                    # Get the position and orientation (just one angle) of the detected tag
+                    center_x, center_y = int(detection.center[0]), int(detection.center[1])  # 中心点 (center point)
+                    angle = int(math.degrees(math.atan2(corners[0][1] - corners[1][1], corners[0][0] - corners[1][0])))  # 计算旋转角 (Calculate the rotation angle)
+
+                    # Put text where the tag was detected
+                    cv2.putText(frame, str(tag_id), (center_x - 10, center_y + 10), cv2.FONT_HERSHEY_SIMPLEX, 1, [0, 255, 255], 2)
+
+        return frame, center_x, center_y, angle
+
+    def process_frame(self, frame: np.array)->Tuple[np.array, int, int, int]:
         """Process the frame. Take in a raw frame, detect the cube in the frame,
         and return the processed frame and parameters for describing the cube
         position in the frame."""
@@ -170,13 +205,17 @@ class ArmPerceptionNode():
         # If the current color the robot is looking for is included in the color ranges
         if self._target_color in self.color_range:
             processed_frame, center_x, center_y = self.detect_color(frame)
+            angle = None
+        elif self._target_color in self.tags:
+            processed_frame, center_x, center_y, angle = self.detect_tag(frame)
         else:
             processed_frame = frame.copy()
             center_x = None
             center_y = None
+            angle = None
 
         # Return the processed frame along with parameters describing perceived object
-        return processed_frame, center_x, center_y
+        return processed_frame, center_x, center_y, angle
 
 if __name__ == '__main__':
     perception_node = ArmPerceptionNode()
