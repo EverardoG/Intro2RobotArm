@@ -8,6 +8,7 @@ import numpy as np
 # ROS libaries
 import rospy
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import Point
 
 # Arm fpv libraries
 from sensor.msg import Led
@@ -17,14 +18,16 @@ from object_tracking.srv import SetTarget
 class ArmPerceptionNode():
     def __init__(self) -> None:
         """Initialize arm perception node."""
-        rospy.loginfo("Arm perception code Init")
         rospy.init_node('perception_node')
+        rospy.loginfo("Arm perception code Init")
         # Subscriber for raw images
         self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
         # Publisher for processed images visualizing what perception is doing
         self.image_pub = rospy.Publisher('/perception/image_result', Image, queue_size=1)  # register result image publisher
         # Publisher for LED commands
         self.rgb_pub = rospy.Publisher('/sensor/rgb_led', Led, queue_size=1)
+        # Publisher for target points
+        self.point_pub = rospy.Publisher('/perception/target_point', Point, queue_size=1)
 
         # Get lab range from ros param server
         self.color_range = rospy.get_param('/lab_config_manager/color_range_list', {})
@@ -77,12 +80,21 @@ class ArmPerceptionNode():
         # Also get parameters for controller
         frame = cv2_img.copy()
         processed_frame, area_max, center_x, center_y = self.process_frame(frame)
-        # rospy.loginfo(f"area_max: {area_max}")
+        rospy.loginfo(f"area_max: {area_max}")
         rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB).tostring()
 
         # Populate image message with the new image and publish it
         image_msg.data = rgb_image
         self.image_pub.publish(image_msg)
+
+        # If something was detected in the frame, publish its position
+        if center_x is not None and center_y is not None:
+            point_msg = Point()
+            point_msg.x = center_x
+            point_msg.y = center_y
+            point_msg.z = 0
+            self.point_pub.publish(point_msg)
+
         return None
 
     @staticmethod
