@@ -1,4 +1,5 @@
-# Standard libraries
+#!/usr/bin/python3
+#  Standard libraries
 from typing import Tuple, Any
 import math
 import cv2
@@ -11,15 +12,17 @@ from sensor_msgs.msg import Image
 # Arm fpv libraries
 from sensor.msg import Led
 from armpi_fpv import Misc
+from object_tracking.srv import SetTarget
 
 class ArmPerceptionNode():
     def __init__(self) -> None:
         """Initialize arm perception node."""
         rospy.loginfo("Arm perception code Init")
+        rospy.init_node('perception_node')
         # Subscriber for raw images
         self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
         # Publisher for processed images visualizing what perception is doing
-        self.image_pub = rospy.Publisher('/object_tracking/image_result', Image, queue_size=1)  # register result image publisher
+        self.image_pub = rospy.Publisher('/perception/image_result', Image, queue_size=1)  # register result image publisher
         # Publisher for LED commands
         self.rgb_pub = rospy.Publisher('/sensor/rgb_led', Led, queue_size=1)
 
@@ -27,7 +30,7 @@ class ArmPerceptionNode():
         self.color_range = rospy.get_param('/lab_config_manager/color_range_list', {})
 
         # Service for setting up the target color for the perception code
-        self.set_target_srv = rospy.Service('/object_tracking/set_target', SetTarget, self.set_target)
+        self.set_target_srv = rospy.Service('/perception/set_target', SetTarget, self.set_target)
         # Frame size
         self.size = (320, 240)
         # Target color
@@ -73,7 +76,8 @@ class ArmPerceptionNode():
         # Process the frame to get an rgb image with sensing shown on it
         # Also get parameters for controller
         frame = cv2_img.copy()
-        processed_frame, center_x, center_y, area_max = self.process_frame(frame)
+        processed_frame, area_max, center_x, center_y = self.process_frame(frame)
+        # rospy.loginfo(f"area_max: {area_max}")
         rgb_image = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB).tostring()
 
         # Populate image message with the new image and publish it
@@ -128,6 +132,8 @@ class ArmPerceptionNode():
             contours = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)[-2]  # 找出轮廓 (find the outline)
             area_max_contour, area_max = self.getAreaMaxContour(contours)  # 找出最大轮廓 (find the largest contour)
 
+        center_x = None
+        center_y = None
         # If the maxmimum area found is above a threshold
         if area_max > 100:  # 有找到最大面积 (have found the largest area)
             (center_x, center_y), radius = cv2.minEnclosingCircle(area_max_contour)  # 获取最小外接圆 (Get the smallest circumcircle)
@@ -140,7 +146,7 @@ class ArmPerceptionNode():
                 cv2.circle(frame, (int(center_x), int(center_y)), int(radius), self.range_rgb[self._target_color], 2)
 
         # Return the processed frame along with parameters describing perceived object
-        return frame, center_x, center_y, area_max
+        return frame, area_max, center_x, center_y
 
 if __name__ == '__main__':
     perception_node = ArmPerceptionNode()
