@@ -23,18 +23,14 @@ class ArmPerceptionNode():
         rospy.loginfo("Arm perception code Init")
         # Get lab range from ros param server
         self.color_range = rospy.get_param('/lab_config_manager/color_range_list', {})
-
-        # Service for setting up the target color for the perception code
-        self.set_target_srv = rospy.Service('/perception/set_target', SetTarget, self.set_target)
         # Frame size
         self.size = (320, 240)
         # Target - either color or april tag
-        self._target_color = None
+        self._target = None
         # April tag detector
         self.detector = apriltag.Detector(searchpath=apriltag._get_demo_searchpath())
         # List of tags
         self.tags = ['tag1', 'tag2', 'tag3']
-        rospy.loginfo(f"self.tags: {self.tags}")
         # Colors for LED
         self.range_rgb = {
             'red': (0, 0, 255),
@@ -46,26 +42,28 @@ class ArmPerceptionNode():
             'tag2' : (255, 0, 255),
             'tag3' : (0, 255, 255)
         }
-        # Subscriber for raw images
-        self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
         # Publisher for processed images visualizing what perception is doing
         self.image_pub = rospy.Publisher('/perception/image_result', Image, queue_size=1)  # register result image publisher
         # Publisher for LED commands
         self.rgb_pub = rospy.Publisher('/sensor/rgb_led', Led, queue_size=1)
         # Publisher for target points
         self.point_pub = rospy.Publisher('/perception/target_pose', Pose2D, queue_size=1)
+        # Service for setting up the target color for the perception code
+        self.set_target_srv = rospy.Service('/perception/set_target', SetTarget, self.set_target)
+        # Subscriber for raw images
+        self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
         return None
 
     def set_target(self, msg):
         """Set a target. Change LED color to correspond to target color, or corrseponding color if target is arcuo tag."""
         rospy.loginfo("%s", msg)
         if msg.data in self.tags or msg.data in self.range_rgb:
-            self._target_color = msg.data
+            self._target = msg.data
             led = Led()
             led.index = 0
-            led.rgb.r = self.range_rgb[self._target_color][2]
-            led.rgb.g = self.range_rgb[self._target_color][1]
-            led.rgb.b = self.range_rgb[self._target_color][0]
+            led.rgb.r = self.range_rgb[self._target][2]
+            led.rgb.g = self.range_rgb[self._target][1]
+            led.rgb.b = self.range_rgb[self._target][0]
             self.rgb_pub.publish(led)
             led.index = 1
             self.rgb_pub.publish(led)
@@ -129,6 +127,7 @@ class ArmPerceptionNode():
         return area_max_contour, contour_area_max  # 返回最大的轮廓
 
     def detect_color(self, frame: np.array)->Tuple[np.array, int, int]:
+        """Detect the target color in the frame. Return the center x and y if color is target is found."""
         # Grab frame dimensions
         img_h, img_w = frame.shape[:2]
 
@@ -144,7 +143,7 @@ class ArmPerceptionNode():
         area_max_contour = 0
 
         # target color range is the color range for the specific target color
-        target_color_range = self.color_range[self._target_color]
+        target_color_range = self.color_range[self._target]
         frame_mask = cv2.inRange(frame_lab, tuple(target_color_range['min']), tuple(target_color_range['max']))  # 对原图像和掩模进行位运算 (Bitwise operations on the original image and mask)
         eroded = cv2.erode(frame_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  # 腐蚀 (corrosion)
         dilated = cv2.dilate(eroded, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))  # 膨胀 (swell)
@@ -162,11 +161,12 @@ class ArmPerceptionNode():
             # If the radius is above some threshold (too big?), publish the image as is
             if radius < 100:
                 # Draw a circle around the target color
-                cv2.circle(frame, (int(center_x), int(center_y)), int(radius), self.range_rgb[self._target_color], 2)
+                cv2.circle(frame, (int(center_x), int(center_y)), int(radius), self.range_rgb[self._target], 2)
 
         return frame, center_x, center_y
 
     def detect_tag(self, frame: np.array)->Tuple[np.array, int, int]:
+        """Detect the target tag in the frame. Return the center x and y and angle if tag is found."""
         # Make the image grayscale and run apriltag detector
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         detections = self.detector.detect(gray, return_image=False)
@@ -181,7 +181,7 @@ class ArmPerceptionNode():
             for detection in detections:
                 # Grab the id to determine if it's the tag being searched for
                 tag_id = int(detection.tag_id)
-                if self.tags[tag_id-1] == self._target_color:
+                if self.tags[tag_id-1] == self._target:
                     # Draw the contours around the corners of the april tag
                     corners = np.rint(detection.corners)  # 获取四个角点 (get four corners)
                     cv2.drawContours(frame, [np.array(corners, np.int)], -1, (0, 255, 255), 2)
@@ -198,16 +198,19 @@ class ArmPerceptionNode():
     def process_frame(self, frame: np.array)->Tuple[np.array, int, int, int]:
         """Process the frame. Take in a raw frame, detect the cube in the frame,
         and return the processed frame and parameters for describing the cube
-        position in the frame."""
+        pose in the frame."""
 
-        # _target_color - Current color the robot is looking for
+        # _target - Current target the robot is looking for
         # color_range is the ranges for specific colors in the LAB space
-        # If the current color the robot is looking for is included in the color ranges
-        if self._target_color in self.color_range:
+        # If the current target the robot is looking for is included in the color ranges,
+        # then detect the color
+        if self._target in self.color_range:
             processed_frame, center_x, center_y = self.detect_color(frame)
             angle = None
-        elif self._target_color in self.tags:
+        # If the target is one of the tags, then detect the tag
+        elif self._target in self.tags:
             processed_frame, center_x, center_y, angle = self.detect_tag(frame)
+        # Otherwise don't detect anything
         else:
             processed_frame = frame.copy()
             center_x = None
