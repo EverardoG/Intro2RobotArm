@@ -135,6 +135,8 @@ class ArmPerceptionNode():
         # Grab frame dimensions
         img_h, img_w = frame.shape[:2]
 
+        rospy.loginfo(f"img_h: {img_h} | img_w: {img_w}")
+
         # Draw a crosshair in the center of the frame
         cv2.line(frame, (int(img_w / 2 - 10), int(img_h / 2)), (int(img_w / 2 + 10), int(img_h / 2)), (0, 255, 255), 2)
         cv2.line(frame, (int(img_w / 2), int(img_h / 2 - 10)), (int(img_w / 2), int(img_h / 2 + 10)), (0, 255, 255), 2)
