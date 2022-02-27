@@ -57,7 +57,7 @@ class ArmPerceptionNode():
         self.image_sub = rospy.Subscriber('/usb_cam/image_raw', Image, self.image_callback)
         return None
 
-    def set_target(self, msg):
+    def set_target(self, msg) -> Tuple[bool, str]:
         """Set a target. Change LED color to correspond to target color, or corrseponding color if target is arcuo tag."""
         rospy.loginfo("%s", msg)
         if msg.data in self.tags or msg.data in self.range_rgb:
